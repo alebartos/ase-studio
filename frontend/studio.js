@@ -1614,7 +1614,7 @@ async function togglePortalAccount() {
     await portalSignOut();
     return;
   }
-  await portalSignIn();
+  if (await portalSignIn()) showPortalCourse();
 }
 
 async function togglePortalUpload() {
@@ -1622,7 +1622,7 @@ async function togglePortalUpload() {
   $("#portal-upload-options").hidden = !enabled;
   localStorage.setItem("ase-studio-portal-upload", enabled ? "1" : "0");
   if (!enabled) return;
-  if (!portalState.loggedIn) await portalSignIn();
+  if (portalState.loggedIn || await portalSignIn()) showPortalCourse();
 }
 
 function appendSubmissionLog(text) {
@@ -1661,6 +1661,17 @@ async function offerManualUpload(archive, reason) {
 
 function portalCourseLabel(course) {
   return course.name + (course.shortcode ? " · " + course.shortcode : "");
+}
+
+// Shows the student's ASE course (Italian or English edition) once known.
+async function showPortalCourse() {
+  try {
+    const label = portalCourseLabel((await api("/api/portal/course")).course);
+    $("#portal-course").textContent = label;
+    $("#elaborati-course").textContent = label;
+  } catch (_error) {
+    // The upload reports a missing course or session with a clear message.
+  }
 }
 
 function reviewPortalUpload(preview) {
@@ -1856,6 +1867,7 @@ async function submitAssignment() {
     await refreshPortalStatus();
     $("#submission-dialog").showModal();
     $("#submission-assignment").focus();
+    if (portalState.loggedIn) showPortalCourse();
   } catch (error) {
     await showActionMessage("Prepare submission", error.message);
   }
