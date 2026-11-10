@@ -42,10 +42,21 @@ KEYRING_SERVICE = "ASE Studio Portale"
 KEYRING_ACCOUNT = "portal-session"
 
 
+# What happened during the current action, reported with any error so that a
+# failure can be diagnosed from the student's message: API calls and their
+# HTTP status, careers and courses found. Never passwords or tokens.
+TRACE: list[str] = []
+
+
+def trace(line: str) -> None:
+    TRACE.append(line)
+
+
 class HandlerError(Exception):
-    def __init__(self, message, sign_in=False):
+    def __init__(self, message, sign_in=False, details=True):
         super().__init__(message)
         self.sign_in = sign_in
+        self.details = details and not sign_in
 
 
 # --------------------------------------------------------------- remembered session
@@ -190,11 +201,13 @@ def api(method, path, token=None, body=None, content_type=None,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
+            trace(f"{method} {path} -> HTTP {response.status}")
     except urllib.error.HTTPError as error:
         try:
             message = error_message(error.read())
         except OSError:
             message = ""
+        trace(f"{method} {path} -> HTTP {error.code}" + (f" ({message})" if message else ""))
         if missing_ok and error.code == 404:
             return None
         if token and error.code in {401, 403}:
@@ -202,10 +215,11 @@ def api(method, path, token=None, body=None, content_type=None,
                                "Sign in again.", sign_in=True)
         if not token and 400 <= error.code < 500:
             raise HandlerError(message or "The Portale della Didattica rejected the "
-                                          f"sign-in (HTTP {error.code}).")
+                                          f"sign-in (HTTP {error.code}).", details=False)
         raise HandlerError(message or f"The Portale della Didattica returned HTTP {error.code}.")
     except (urllib.error.URLError, OSError) as error:
         reason = getattr(error, "reason", None) or error
+        trace(f"{method} {path} -> not reachable ({reason})")
         raise HandlerError(f"The Portale della Didattica could not be reached: {reason}")
     if not raw:
         return {}
@@ -276,6 +290,10 @@ class Portale:
                         "shortcode": str(entry.get("shortcode") or course.get("shortcode") or ""),
                         "year": entry.get("year") or course.get("year"),
                     })
+        listed = ", ".join(f"{c['name']} ({c['shortcode'] or c['id']}, {c['year']})"
+                           for c in courses[:40])
+        trace(f"Courses of career {self.session.get('username', '?')}: {listed or 'none'}"
+              + (f" and {len(courses) - 40} more" if len(courses) > 40 else ""))
         matches = [c for c in courses if c["shortcode"].upper()[:5] in COURSE_CODES]
         return max(matches, key=lambda c: (c["year"] or 0, c["id"])) if matches else None
 
@@ -286,6 +304,7 @@ class Portale:
         if isinstance(data, dict) and isinstance(data.get("token"), str) and data["token"]:
             self.session["token"] = data["token"]
         self.session["username"] = str((data or {}).get("username") or username)
+        trace(f"Switched to career {self.session['username']}")
         self.changed = True
 
     # A student can have several careers (e.g. bachelor's and master's), each
@@ -303,6 +322,8 @@ class Portale:
             original = str(data.get("username") or self.session.get("username") or "").lower()
             others = [str(name).lower() for name in data.get("allUsernames") or []
                       if isinstance(name, str) and str(name).lower() != original]
+            trace(f"Course codes searched: {', '.join(COURSE_CODES)}; careers of the account: "
+                  f"{', '.join(data.get('allUsernames') or []) or 'unknown'} (current: {original or '?'})")
             for username in others:
                 self.switch_career(username)
                 course = self.course_of_career(self.session["token"])
@@ -375,6 +396,7 @@ class Portale:
         except HandlerError as error:
             if error.sign_in:
                 raise
+            response["destinationError"] = with_details(str(error), "status")
         response.update(account=self.session.get("username", ""),
                         remembered=bool(self.session.get("remembered")))
         return self.reply(response)
@@ -384,9 +406,9 @@ class Portale:
         username = str(fields.get("username") or "").strip()
         password = str(fields.get("password") or "")
         if not username or len(username) > 64:
-            raise HandlerError("Enter your PoliTO username.")
+            raise HandlerError("Enter your PoliTO username.", details=False)
         if not password or len(password) > 256:
-            raise HandlerError("Enter your password.")
+            raise HandlerError("Enter your password.", details=False)
         response = self.call("POST", "/auth/login", body={
             "loginType": "basic", "username": username, "password": password,
             "preferences": {"language": "en"}, "client": self.client(), "device": DEVICE,
@@ -507,6 +529,27 @@ ACTIONS = {"describe": Portale.describe, "status": Portale.status, "signIn": Por
            "list": Portale.list, "withdraw": Portale.withdraw_action}
 
 
+def log_path() -> Path:
+    return credentials_path().parent / "polito_portale.log"
+
+
+def with_details(message: str, action: str) -> str:
+    """Append the trace of the current action to an error, and save it to the log."""
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    lines = [f"Details ({stamp}, action {action}, API {API}, "
+             f"handler on Python {sys.version.split()[0]}):"]
+    lines += [f"  {line}" for line in TRACE] or ["  (no request was sent)"]
+    try:
+        path = log_path()
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as log:
+            log.write(f"ERROR: {message}\n" + "\n".join(lines) + "\n\n")
+        lines.append(f"Saved in {path}")
+    except OSError:
+        pass
+    return message + "\n\n" + "\n".join(lines)
+
+
 def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     try:
@@ -523,7 +566,8 @@ def main() -> int:
     except HandlerError as error:
         if error.sign_in:
             handler.drop_session()
-        response = handler.reply({"error": str(error), "signIn": error.sign_in})
+        message = with_details(str(error), action) if error.details else str(error)
+        response = handler.reply({"error": message, "signIn": error.sign_in})
     json.dump(response, sys.stdout)
     return 0
 

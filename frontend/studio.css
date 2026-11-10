@@ -427,6 +427,8 @@ dialog::backdrop { background: #0f172a73; }
 .handler-account, .submissions-destination { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink); }
 .handler-account span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .handler-destination { margin: 0; color: var(--ink); }
+.handler-error { margin: 0; max-height: 220px; overflow: auto; padding: 8px; border: 1px solid #f1b5af; border-radius: 5px; background: #fff5f5; color: #9b1c1c; font: 11px/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
+.handler-error[hidden] { display: none; }
 .handler-experimental { padding: 1px 6px; border: 1px solid #f59f00; border-radius: 4px; color: #a85d00; font-size: 11px; }
 #upload-review-dialog { width: min(620px, calc(100vw - 30px)); }
 #upload-review-form, #submissions-form { padding: 20px; display: grid; gap: 14px; max-height: calc(100vh - 30px); overflow: auto; }
@@ -562,6 +564,7 @@ html[data-theme="dark"] #handler-login-form > .handler-login-message.error,
 html[data-theme="dark"] .submission-item.withdrawn .submission-item-status { color: #fca5a5; }
 html[data-theme="dark"] .submission-item-status { color: #86efac; }
 html[data-theme="dark"] .handler-experimental { color: #fcd34d; border-color: #b45309; }
+html[data-theme="dark"] .handler-error { background: #2a1416; border-color: #7f1d1d; color: #fca5a5; }
 html[data-theme="dark"] .submission-project:hover { background: #243249; }
 html[data-theme="dark"] .theme { background: #334155; color: #f8fafc; }
 html[data-theme="dark"] .gear { background: #334155; color: #f8fafc; }

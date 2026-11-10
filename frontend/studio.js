@@ -1539,6 +1539,10 @@ async function handlerCall(action, body) {
 async function showHandlerDestination() {
   await refreshHandlerStatus();
   $("#handler-destination").textContent = handlerState.destination || "—";
+  // The handler's error, with its diagnostic details, when it could not
+  // resolve the destination (e.g. the course was not found).
+  $("#handler-destination-error").textContent = handlerState.destinationError || "";
+  $("#handler-destination-error").hidden = !handlerState.destinationError;
 }
 
 function showHandlerLoginMessage(message, isError = false) {
@@ -1614,6 +1618,7 @@ async function handlerSignOut() {
     await showActionMessage(handlerInfo.name || "Sign out", error.message);
   }
   $("#handler-destination").textContent = "—";
+  $("#handler-destination-error").hidden = true;
   updateHandlerAccount();
 }
 
@@ -1749,8 +1754,10 @@ async function uploadWithHandler(archive) {
   }
 }
 
-function renderSubmissionsMessage(message) {
-  $("#submissions-list").innerHTML = '<p class="submissions-empty">' + escapeHtml(message) + "</p>";
+function renderSubmissionsMessage(message, isError = false) {
+  $("#submissions-list").innerHTML = isError
+    ? '<pre class="handler-error">' + escapeHtml(message) + "</pre>"
+    : '<p class="submissions-empty">' + escapeHtml(message) + "</p>";
 }
 
 function renderSubmissions(items) {
@@ -1791,7 +1798,7 @@ async function loadSubmissions() {
   } catch (error) {
     await refreshHandlerStatus();
     $("#submissions-refresh").disabled = !(!handlerInfo.signIn || handlerState.signedIn);
-    renderSubmissionsMessage(error.message);
+    renderSubmissionsMessage(error.message, true);
   }
 }
 

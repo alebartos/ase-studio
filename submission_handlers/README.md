@@ -47,12 +47,15 @@ Every request contains:
 A response may contain `session` (stored and sent back with the next
 request; `null` clears it). An error is reported as
 `{"error": "message"}`; add `"signIn": true` when the session is missing or
-expired, and ASE Studio asks the student to sign in and retries once.
+expired, and ASE Studio asks the student to sign in and retries once. The
+message is shown as is, on several lines if needed, so a handler can append
+diagnostic details (the PoliTO handler lists its API calls, the careers and
+the courses it found, and saves them to a log file).
 
 | Action | Request | Response |
 | --- | --- | --- |
 | `describe` | – | `name`, `description`, `experimental` (shows a warning), `website` (offered after a manual save), `signIn` (or `null`): `{title, note, fields: [{id, label, type: "text"\|"password", placeholder}], remember}`, `list` (or `null`): `{label, withdraw}` |
-| `status` | – | `signedIn`, `account`, `destination` |
+| `status` | – | `signedIn`, `account`, `destination`; `destinationError` if it could not be resolved |
 | `signIn` | `fields` (values by field id), `remember` | as `status` |
 | `signOut` | – | `{"signedIn": false}` |
 | `preview` | `archive` | `destination`, `existing`: items with the same file name already delivered |
