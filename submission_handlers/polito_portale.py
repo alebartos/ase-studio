@@ -37,6 +37,7 @@ UPLOAD_TIMEOUT = 300
 COURSE_CODES = tuple(
     code.strip().upper()[:5] for code in
     os.environ.get("ASE_STUDIO_PORTAL_COURSE", "02GOL,02LSE").split(",") if code.strip())
+DEVICE = {"platform": "linux", "toothPicCompatible": False}
 KEYRING_SERVICE = "ASE Studio Portale"
 KEYRING_ACCOUNT = "portal-session"
 
@@ -251,10 +252,15 @@ class Portale:
         self.changed = True
 
     # The course is looked up once per session.
-    def course(self) -> dict:
-        token = self.token()
-        if self.session.get("course"):
-            return self.session["course"]
+    def client(self) -> dict:
+        client = {"name": "ASE Studio", "appVersion": self.version,
+                  "buildNumber": build_number(self.version)}
+        if self.session and self.session.get("clientId"):
+            client["id"] = self.session["clientId"]
+        return client
+
+    def course_of_career(self, token: str) -> dict | None:
+        """The course in the career the token belongs to, newest year first."""
         response = self.call("GET", "/v2/courses", token, missing_ok=True)
         if response is None:
             response = self.call("GET", "/courses", token)
@@ -271,11 +277,45 @@ class Portale:
                         "year": entry.get("year") or course.get("year"),
                     })
         matches = [c for c in courses if c["shortcode"].upper()[:5] in COURSE_CODES]
-        if not matches:
-            raise HandlerError("Your PoliTO account is not enrolled in Architetture dei "
-                               "sistemi di elaborazione or Computer architectures on the "
-                               "Portale della Didattica.")
-        course = max(matches, key=lambda c: (c["year"] or 0, c["id"]))
+        return max(matches, key=lambda c: (c["year"] or 0, c["id"])) if matches else None
+
+    def switch_career(self, username: str) -> None:
+        response = self.call("POST", "/auth/switch-career", self.token(), {
+            "username": username, "client": self.client(), "device": DEVICE})
+        data = response.get("data") if isinstance(response, dict) else None
+        if isinstance(data, dict) and isinstance(data.get("token"), str) and data["token"]:
+            self.session["token"] = data["token"]
+        self.session["username"] = str((data or {}).get("username") or username)
+        self.changed = True
+
+    # A student can have several careers (e.g. bachelor's and master's), each
+    # with its own username; sign-in opens the default one, which may not be
+    # the one that includes the course. The course is looked up once per
+    # session, switching to the career that has it.
+    def course(self) -> dict:
+        token = self.token()
+        if self.session.get("course"):
+            return self.session["course"]
+        course = self.course_of_career(token)
+        if course is None:
+            profile = self.call("GET", "/auth/profile", token, missing_ok=True) or {}
+            data = profile.get("data") if isinstance(profile.get("data"), dict) else {}
+            original = str(data.get("username") or self.session.get("username") or "").lower()
+            others = [str(name).lower() for name in data.get("allUsernames") or []
+                      if isinstance(name, str) and str(name).lower() != original]
+            for username in others:
+                self.switch_career(username)
+                course = self.course_of_career(self.session["token"])
+                if course is not None:
+                    break
+            if course is None:
+                if others and original:
+                    self.switch_career(original)
+                raise HandlerError("None of the careers of your PoliTO account includes "
+                                   "Architetture dei sistemi di elaborazione or Computer "
+                                   "architectures on the Portale della Didattica.")
+            if self.session.get("remembered"):
+                remember(self.session)
         self.session["course"] = course
         self.changed = True
         return course
@@ -328,13 +368,15 @@ class Portale:
     def status(self) -> dict:
         if not self.session:
             return self.reply({"signedIn": False})
-        response = {"signedIn": True, "account": self.session.get("username", ""),
-                    "remembered": bool(self.session.get("remembered"))}
+        response = {"signedIn": True}
         try:
+            # Looking up the course may switch to another career first.
             response["destination"] = self.destination()
         except HandlerError as error:
             if error.sign_in:
                 raise
+        response.update(account=self.session.get("username", ""),
+                        remembered=bool(self.session.get("remembered")))
         return self.reply(response)
 
     def signIn(self) -> dict:
@@ -345,14 +387,9 @@ class Portale:
             raise HandlerError("Enter your PoliTO username.")
         if not password or len(password) > 256:
             raise HandlerError("Enter your password.")
-        client = {"name": "ASE Studio", "appVersion": self.version,
-                  "buildNumber": build_number(self.version)}
-        if self.session and self.session.get("clientId"):
-            client["id"] = self.session["clientId"]
         response = self.call("POST", "/auth/login", body={
             "loginType": "basic", "username": username, "password": password,
-            "preferences": {"language": "en"}, "client": client,
-            "device": {"platform": "linux", "toothPicCompatible": False},
+            "preferences": {"language": "en"}, "client": self.client(), "device": DEVICE,
         })
         data = response.get("data") if isinstance(response, dict) else None
         token = data.get("token") if isinstance(data, dict) else None
