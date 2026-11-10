@@ -246,7 +246,11 @@ async function api(url, options = {}) {
   } catch (_error) {
     throw Error(`ASE Studio received an incompatible server response (${response.status}). Stop the old server and restart ./ase-studio.sh.`);
   }
-  if (!response.ok) throw Error(data.error || "Request failed");
+  if (!response.ok) {
+    const error = Error(data.error || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -1458,6 +1462,381 @@ function submissionAttachment(file) {
   });
 }
 
+// Optional submission handler (submission_handlers/README.md): a separate
+// program, chosen by the course or institution, that delivers the ZIP. The
+// interface below is generic; the handler describes its name, its sign-in
+// fields and whether it can list and withdraw submissions.
+let handlerInfo = {available: false};
+let handlerState = {signedIn: false, account: ""};
+let handlerLoginResolver = null;
+let handlerReviewResolver = null;
+
+function jsonRequest(body) {
+  return {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+}
+
+function handlerRequest(action, body = {}) {
+  return api("/api/submission-handler", jsonRequest({action, ...body}));
+}
+
+async function loadSubmissionHandler() {
+  try {
+    handlerInfo = await api("/api/submission-handler");
+  } catch (_error) {
+    handlerInfo = {available: false};
+  }
+  const available = Boolean(handlerInfo.available);
+  $("#handler-section").hidden = !available;
+  $("#submissions").hidden = !(available && handlerInfo.list);
+  if (!available) return;
+  $("#handler-name").textContent = handlerInfo.name || "Upload";
+  $("#handler-upload-label").textContent = "Upload the ZIP to " + (handlerInfo.name || "the configured destination");
+  $("#handler-upload-label").title = handlerInfo.description || "";
+  $("#handler-experimental").hidden = !handlerInfo.experimental;
+  if (handlerInfo.list) {
+    $("#submissions").textContent = handlerInfo.list.label || "Submissions";
+    $("#submissions-title").textContent = handlerInfo.list.label || "Submissions";
+    $("#submissions-note").textContent = handlerInfo.list.withdraw
+      ? "Withdrawn submissions stay listed and can be restored." : "";
+  }
+}
+
+function updateHandlerAccount() {
+  const needsSignIn = Boolean(handlerInfo.signIn);
+  const status = !needsSignIn ? "No sign-in needed."
+    : handlerState.signedIn ? "Signed in as " + (handlerState.account || "you") + "." : "Not signed in.";
+  const action = handlerState.signedIn ? "Sign out" : "Sign in";
+  for (const prefix of ["handler", "submissions"]) {
+    $("#" + prefix + "-account").textContent = status;
+    $("#" + prefix + "-account-button").textContent = action;
+    $("#" + prefix + "-account-button").hidden = !needsSignIn;
+  }
+}
+
+async function refreshHandlerStatus() {
+  try {
+    handlerState = await handlerRequest("status");
+  } catch (_error) {
+    handlerState = {signedIn: false, account: ""};
+  }
+  updateHandlerAccount();
+}
+
+// Runs a handler request, asking the student to sign in again once if the
+// session is missing or has expired.
+async function handlerCall(action, body) {
+  try {
+    return await handlerRequest(action, body);
+  } catch (error) {
+    if (error.status !== 401 || !handlerInfo.signIn) throw error;
+    handlerState = {signedIn: false, account: ""};
+    updateHandlerAccount();
+    if (!(await handlerSignIn())) throw error;
+    return await handlerRequest(action, body);
+  }
+}
+
+async function showHandlerDestination() {
+  await refreshHandlerStatus();
+  $("#handler-destination").textContent = handlerState.destination || "—";
+}
+
+function showHandlerLoginMessage(message, isError = false) {
+  const element = $("#handler-login-message");
+  element.textContent = message || "";
+  element.hidden = !message;
+  element.classList.toggle("error", isError);
+}
+
+function setHandlerLoginBusy(busy) {
+  document.querySelectorAll("#handler-login-fields input, #handler-remember, #handler-login-confirm")
+    .forEach(element => { element.disabled = busy; });
+  $("#handler-login-confirm").textContent = busy ? "Signing in…" : "Sign in";
+}
+
+function handlerSignIn() {
+  if (handlerLoginResolver || !handlerInfo.signIn) return Promise.resolve(false);
+  const signIn = handlerInfo.signIn;
+  $("#handler-login-title").textContent = signIn.title || "Sign in";
+  $("#handler-login-note").textContent = signIn.note || "";
+  $("#handler-login-note").hidden = !signIn.note;
+  $("#handler-login-fields").innerHTML = (signIn.fields || []).map(field =>
+    '<label>' + escapeHtml(field.label || field.id) + '<input data-handler-field="' + escapeHtml(field.id)
+    + '" type="' + (field.type === "password" ? "password" : "text") + '" placeholder="' + escapeHtml(field.placeholder || "")
+    + '" autocomplete="' + (field.type === "password" ? "current-password" : "username") + '" spellcheck="false"></label>'
+  ).join("");
+  $("#handler-remember-wrap").hidden = !signIn.remember;
+  $("#handler-remember").checked = localStorage.getItem("ase-studio-handler-remember") === "1";
+  $("#handler-remember-note").textContent = signIn.remember ? "(" + signIn.remember + ")" : "";
+  showHandlerLoginMessage("");
+  setHandlerLoginBusy(false);
+  $("#handler-login-dialog").showModal();
+  setTimeout(() => $("#handler-login-fields input")?.focus(), 0);
+  return new Promise(resolve => { handlerLoginResolver = resolve; });
+}
+
+function finishHandlerLogin(signedIn) {
+  document.querySelectorAll("#handler-login-fields input[type=password]").forEach(input => { input.value = ""; });
+  const dialog = $("#handler-login-dialog");
+  if (dialog.open) dialog.close();
+  const resolver = handlerLoginResolver;
+  handlerLoginResolver = null;
+  updateHandlerAccount();
+  if (resolver) resolver(signedIn);
+}
+
+async function submitHandlerLogin() {
+  const fields = {};
+  document.querySelectorAll("[data-handler-field]").forEach(input => {
+    fields[input.dataset.handlerField] = input.type === "password" ? input.value : input.value.trim();
+  });
+  if (Object.values(fields).some(value => !value)) {
+    showHandlerLoginMessage("Fill in every field.", true);
+    return;
+  }
+  const remember = !$("#handler-remember-wrap").hidden && $("#handler-remember").checked;
+  localStorage.setItem("ase-studio-handler-remember", remember ? "1" : "0");
+  setHandlerLoginBusy(true);
+  showHandlerLoginMessage("");
+  try {
+    handlerState = await handlerRequest("signIn", {fields, remember});
+    finishHandlerLogin(true);
+  } catch (error) {
+    setHandlerLoginBusy(false);
+    showHandlerLoginMessage(error.message, true);
+  }
+}
+
+async function handlerSignOut() {
+  try {
+    handlerState = await handlerRequest("signOut");
+  } catch (error) {
+    await showActionMessage(handlerInfo.name || "Sign out", error.message);
+  }
+  $("#handler-destination").textContent = "—";
+  updateHandlerAccount();
+}
+
+async function toggleHandlerAccount() {
+  if (handlerState.signedIn) {
+    await handlerSignOut();
+    return;
+  }
+  if (await handlerSignIn()) showHandlerDestination();
+}
+
+async function toggleHandlerUpload() {
+  const enabled = $("#handler-upload").checked;
+  $("#handler-options").hidden = !enabled;
+  localStorage.setItem("ase-studio-handler-upload", enabled ? "1" : "0");
+  if (!enabled) return;
+  if (!handlerInfo.signIn || handlerState.signedIn || await handlerSignIn()) showHandlerDestination();
+}
+
+function appendSubmissionLog(text) {
+  lastNormalLog += "\n\n" + text;
+  lastAdvancedLog += "\n\n" + text;
+  updateLog();
+}
+
+function formatHandlerDate(value) {
+  const date = new Date(value);
+  return value && !Number.isNaN(date.getTime()) ? date.toLocaleString() : (value || "—");
+}
+
+function saveSubmissionZip(archive) {
+  const link = document.createElement("a");
+  link.href = "/api/submission/download?archive=" + encodeURIComponent(archive);
+  link.download = "";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function offerManualUpload(archive, reason) {
+  saveSubmissionZip(archive);
+  appendSubmissionLog("Saving the ZIP for manual upload.");
+  const website = handlerInfo.available && handlerInfo.website;
+  const choice = await actionDialog({
+    title: "Save ZIP for manual upload",
+    message: (reason ? reason + "\n\n" : "") + "Choose where to save the ZIP, then submit it the usual way.",
+    confirmLabel: website ? "Open " + (handlerInfo.name || "website") : "OK",
+    confirmValue: website ? "website" : true,
+    cancelLabel: website ? "Close" : null
+  });
+  if (choice === "website") window.open(website, "_blank", "noopener");
+}
+
+function reviewHandlerUpload(preview) {
+  const entry = item => '<div class="submission-file-entry"><strong title="' + escapeHtml(item.name)
+    + '">' + escapeHtml(item.name) + "</strong><span>" + item.detail + "</span></div>";
+  $("#upload-review-destination").textContent = preview.destination || handlerInfo.name || "";
+  $("#upload-review-file").textContent = preview.filename;
+  $("#upload-review-size").textContent = formatSubmissionFileSize(preview.size);
+  $("#upload-review-description").value = preview.description;
+  $("#upload-review-contents-title").textContent = "Contents · " + preview.entries.length + " file(s)";
+  $("#upload-review-entries").innerHTML = preview.entries.map(file =>
+    entry({name: file.path, detail: formatSubmissionFileSize(file.size)})).join("");
+  const existing = preview.existing || [];
+  $("#upload-review-existing").hidden = !existing.length;
+  $("#upload-review-existing-list").innerHTML = existing.map(item =>
+    entry({name: item.name, detail: escapeHtml(formatHandlerDate(item.date))
+      + (item.sizeKiB != null ? " · " + item.sizeKiB + " KiB" : "")})).join("");
+  document.querySelector('[name="upload-review-replace"][value="replace"]').checked = true;
+  $("#upload-review-dialog").showModal();
+  $("#upload-review-confirm").focus();
+  return new Promise(resolve => { handlerReviewResolver = resolve; });
+}
+
+function finishHandlerReview(decision) {
+  const dialog = $("#upload-review-dialog");
+  if (dialog.open) dialog.close();
+  const resolver = handlerReviewResolver;
+  handlerReviewResolver = null;
+  if (resolver) resolver(decision);
+}
+
+// Returns true when the ZIP was handed off (uploaded or saved for manual
+// upload), false when it stays only in the submission folder.
+async function uploadWithHandler(archive) {
+  let preview;
+  try {
+    preview = await handlerCall("preview", {archive});
+  } catch (error) {
+    appendSubmissionLog("Upload failed: " + error.message);
+    await offerManualUpload(archive, "The upload could not be prepared: " + error.message);
+    return true;
+  }
+  const decision = await reviewHandlerUpload(preview);
+  if (decision.action === "manual") {
+    await offerManualUpload(archive);
+    return true;
+  }
+  if (decision.action !== "upload") {
+    appendSubmissionLog("Upload cancelled. The ZIP is saved in the submission folder only.");
+    return false;
+  }
+  appendSubmissionLog("Uploading " + preview.filename + " to " + (preview.destination || handlerInfo.name) + "…");
+  $("#submit").textContent = "Uploading…";
+  let replace = (preview.existing || []).length ? decision.replace : null;
+  while (true) {
+    try {
+      const upload = await handlerCall("upload", {archive, description: decision.description, replace});
+      if (upload.conflict) {
+        // The same file was uploaded since the review; ask again.
+        const choice = await actionDialog({
+          title: "Already uploaded",
+          message: "The destination now already contains " + (upload.existing?.[0]?.name || preview.filename) + ".",
+          confirmLabel: "Replace", confirmValue: "replace",
+          alternateLabel: "Keep both", alternateValue: "keep",
+          cancelLabel: "Don't upload"
+        });
+        if (choice !== "replace" && choice !== "keep") {
+          appendSubmissionLog("Upload cancelled. The ZIP is saved in the submission folder only.");
+          return false;
+        }
+        replace = choice === "replace";
+        continue;
+      }
+      appendSubmissionLog([upload.message || "Uploaded " + preview.filename + ".",
+        ...(upload.warnings || []).map(warning => "Warning: " + warning)].join("\n"));
+      return true;
+    } catch (error) {
+      appendSubmissionLog("Upload failed: " + error.message);
+      await offerManualUpload(archive, "The upload failed: " + error.message);
+      return true;
+    }
+  }
+}
+
+function renderSubmissionsMessage(message) {
+  $("#submissions-list").innerHTML = '<p class="submissions-empty">' + escapeHtml(message) + "</p>";
+}
+
+function renderSubmissions(items) {
+  if (!items.length) {
+    renderSubmissionsMessage("Nothing uploaded yet.");
+    return;
+  }
+  const canWithdraw = Boolean(handlerInfo.list?.withdraw);
+  $("#submissions-list").innerHTML = items.map(item => {
+    const withdrawn = Boolean(item.withdrawn);
+    const name = item.url
+      ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noreferrer">' + escapeHtml(item.name) + "</a>"
+      : escapeHtml(item.name);
+    const button = !canWithdraw ? "" : '<button type="button" data-submission-item="' + escapeHtml(item.id)
+      + '" data-name="' + escapeHtml(item.name) + '" data-withdraw="' + (!withdrawn) + '"'
+      + (withdrawn ? ">Restore" : ' class="danger">Withdraw') + "</button>";
+    return '<div class="submission-item' + (withdrawn ? " withdrawn" : "") + '">'
+      + '<div class="submission-item-main"><strong>' + name + "</strong><small>" + escapeHtml(item.description || "") + "</small></div>"
+      + '<div class="submission-item-meta"><span>' + escapeHtml(formatHandlerDate(item.date)) + "</span>"
+      + (item.sizeKiB != null ? "<span>" + item.sizeKiB + " KiB</span>" : "")
+      + '<span class="submission-item-status">' + (withdrawn ? "Withdrawn " + escapeHtml(formatHandlerDate(item.withdrawnAt)) : "Active") + "</span></div>"
+      + button + "</div>";
+  }).join("");
+}
+
+async function loadSubmissions() {
+  const canList = !handlerInfo.signIn || handlerState.signedIn;
+  $("#submissions-refresh").disabled = !canList;
+  if (!canList) {
+    renderSubmissionsMessage("Sign in to see your submissions.");
+    return;
+  }
+  renderSubmissionsMessage("Loading…");
+  try {
+    const data = await handlerCall("list");
+    $("#submissions-destination").textContent = data.destination || "—";
+    renderSubmissions(data.items || []);
+  } catch (error) {
+    await refreshHandlerStatus();
+    $("#submissions-refresh").disabled = !(!handlerInfo.signIn || handlerState.signedIn);
+    renderSubmissionsMessage(error.message);
+  }
+}
+
+async function changeSubmission(button) {
+  const withdrawn = button.dataset.withdraw === "true";
+  if (withdrawn) {
+    const confirmed = await actionDialog({
+      title: "Withdraw submission",
+      message: "Withdraw " + button.dataset.name + "? You can restore it later.",
+      confirmLabel: "Withdraw", cancelLabel: "Cancel", danger: true
+    });
+    if (confirmed !== true) return;
+  }
+  button.disabled = true;
+  try {
+    const data = await handlerCall("withdraw", {id: button.dataset.submissionItem, withdrawn});
+    renderSubmissions(data.items || []);
+  } catch (error) {
+    button.disabled = false;
+    await showActionMessage(handlerInfo.list?.label || "Submissions", error.message);
+  }
+}
+
+async function openSubmissions() {
+  await refreshHandlerStatus();
+  renderSubmissionsMessage("Loading…");
+  $("#submissions-refresh").disabled = true;
+  $("#submissions-dialog").showModal();
+  if (handlerInfo.signIn && !handlerState.signedIn && !(await handlerSignIn())) {
+    renderSubmissionsMessage("Sign in to see your submissions.");
+    return;
+  }
+  await loadSubmissions();
+}
+
+async function toggleSubmissionsAccount() {
+  if (handlerState.signedIn) {
+    await handlerSignOut();
+    $("#submissions-refresh").disabled = true;
+    renderSubmissionsMessage("Sign in to see your submissions.");
+    return;
+  }
+  if (await handlerSignIn()) await loadSubmissions();
+}
+
 async function submitAssignment() {
   if (!current) return;
   try {
@@ -1469,15 +1848,22 @@ async function submitAssignment() {
     $("#submission-files").value = "";
     $("#submission-expand-loops").checked = $("#expand-loops").checked;
     renderSubmissionFiles();
+    await loadSubmissionHandler();
+    const handlerUpload = handlerInfo.available && localStorage.getItem("ase-studio-handler-upload") === "1";
+    $("#handler-upload").checked = handlerUpload;
+    $("#handler-options").hidden = !handlerUpload;
+    if (handlerInfo.available) await refreshHandlerStatus();
     $("#submission-dialog").showModal();
     $("#submission-assignment").focus();
+    if (handlerUpload) showHandlerDestination();
   } catch (error) {
     await showActionMessage("Prepare submission", error.message);
   }
 }
 
-async function prepareSubmission() {
+async function prepareSubmission(mode = "submit") {
   if (!current) return;
+  const manualUpload = mode === "manual";
   const assignment = $("#submission-assignment").value.trim();
   if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(assignment)) {
     await showActionMessage("Invalid assignment name",
@@ -1516,6 +1902,8 @@ async function prepareSubmission() {
     await showActionMessage("Prepare submission", "Additional files exceed the combined 100 MiB limit.");
     return;
   }
+  const handlerUpload = !manualUpload && handlerInfo.available && $("#handler-upload").checked;
+  if (handlerUpload && handlerInfo.signIn && !handlerState.signedIn && !(await handlerSignIn())) return;
 
   const confirmButton = $("#submission-confirm");
   const cancelButton = $("#cancel-submission");
@@ -1579,7 +1967,14 @@ async function prepareSubmission() {
       if (!sourceDirty) clearLocalDraft(current.name);
     }
     updateLog();
-    if (result.ok && result.archive) {
+    let handedOff = false;
+    if (result.ok && result.archive && manualUpload) {
+      await offerManualUpload(result.archive);
+      handedOff = true;
+    } else if (result.ok && result.archive && handlerUpload) {
+      handedOff = await uploadWithHandler(result.archive);
+    }
+    if (result.ok && result.archive && !handedOff) {
       try {
         await api("/api/submission/reveal", {
           method: "POST",
@@ -3551,6 +3946,49 @@ $("#submission-dialog").addEventListener("cancel", event => {
   if ($("#submission-confirm").disabled) event.preventDefault();
 });
 $("#submission-files").onchange = renderSubmissionFiles;
+$("#submission-manual").onclick = () => {
+  if ($("#submission-form").reportValidity()) prepareSubmission("manual");
+};
+$("#handler-upload").onchange = toggleHandlerUpload;
+$("#handler-account-button").onclick = toggleHandlerAccount;
+$("#handler-login-form").onsubmit = event => {
+  event.preventDefault();
+  submitHandlerLogin();
+};
+$("#handler-login-cancel").onclick = () => finishHandlerLogin(false);
+$("#handler-login-dialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  finishHandlerLogin(false);
+});
+$("#upload-review-form").onsubmit = event => {
+  event.preventDefault();
+  const description = $("#upload-review-description").value.trim();
+  if (!description) {
+    $("#upload-review-description").focus();
+    return;
+  }
+  finishHandlerReview({
+    action: "upload",
+    description,
+    replace: document.querySelector('[name="upload-review-replace"]:checked').value === "replace"
+  });
+};
+$("#upload-review-manual").onclick = () => finishHandlerReview({action: "manual"});
+$("#upload-review-cancel").onclick = () => finishHandlerReview({action: "cancel"});
+$("#upload-review-dialog").addEventListener("cancel", event => {
+  event.preventDefault();
+  finishHandlerReview({action: "cancel"});
+});
+$("#submissions").onclick = openSubmissions;
+$("#submissions-close").onclick = () => $("#submissions-dialog").close();
+$("#submissions-form").onsubmit = event => event.preventDefault();
+$("#submissions-refresh").onclick = loadSubmissions;
+$("#submissions-account-button").onclick = toggleSubmissionsAccount;
+$("#submissions-list").addEventListener("click", event => {
+  const button = event.target.closest("button[data-submission-item]");
+  if (button) changeSubmission(button);
+});
+loadSubmissionHandler();
 $("#submission-select-all").onclick = () => {
   document.querySelectorAll("[data-submission-project]").forEach(input => { input.checked = true; });
 };

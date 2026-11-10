@@ -75,6 +75,16 @@ GEM5_VARIANT = "opt"
 OFFICIAL_GEM5_REPOSITORY = "github.com/cad-polito-it/gem5"
 REQUIRED_BRANCHES_FILE = ROOT / "ase_studio_branches.json"
 DEVELOPER_MODE_ENVIRONMENT_VARIABLE = "ASE_STUDIO_DEVELOPER"
+# Optional submission handler: a separate program, chosen by the course or
+# institution, that delivers the submission ZIP (to a university portal, by
+# e-mail, ...). Without this file the feature does not appear.
+# See submission_handlers/README.md.
+SUBMISSION_HANDLER_CONFIG = Path(os.environ.get("ASE_STUDIO_SUBMISSION_HANDLER")
+                                 or ROOT / "submission_handler.json")
+SUBMISSION_HANDLER_ACTIONS = {"status", "signIn", "signOut", "preview", "upload",
+                              "list", "withdraw"}
+SUBMISSION_HANDLER_TIMEOUT = 120
+SUBMISSION_HANDLER_UPLOAD_TIMEOUT = 600
 
 
 def developer_mode_enabled(environment=None):
@@ -5115,8 +5125,8 @@ def create_submission(projects, assignment, attachments=None, expand_loops=False
             "projects": [entry["name"] for entry in selected_projects]}
 
 
-def reveal_submission_folder(archive_path):
-    """Open the file manager at a completed submission's directory."""
+def submission_archive_file(archive_path):
+    """Resolve a generated submission ZIP inside the submission directory."""
     if not isinstance(archive_path, str) or not archive_path:
         fail("The submission archive path is missing.")
     submissions_root = active_submission_directory()
@@ -5127,6 +5137,123 @@ def reveal_submission_folder(archive_path):
         fail("Invalid submission archive path.")
     if not archive.is_file() or archive.suffix.lower() != ".zip":
         fail("The submission ZIP could not be found.", 404)
+    return archive
+
+
+def submission_archive_preview(archive_path):
+    """Describe a submission ZIP: its name, size, and the files it contains."""
+    archive = submission_archive_file(archive_path)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            entries = [{"path": info.filename, "size": info.file_size}
+                       for info in bundle.infolist() if not info.is_dir()]
+    except zipfile.BadZipFile:
+        fail("The submission ZIP is damaged.")
+    return {"filename": archive.name, "description": archive.stem,
+            "size": archive.stat().st_size, "entries": entries}
+
+
+_SUBMISSION_HANDLER = {"session": None, "describe": None, "key": None}
+_SUBMISSION_HANDLER_LOCK = threading.Lock()
+
+
+def submission_handler():
+    """Return (command, working directory, key) of the configured handler, or None."""
+    path = SUBMISSION_HANDLER_CONFIG
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        key = (str(path), path.stat().st_mtime)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        fail(f"The submission handler configuration is invalid: {error}", 500)
+    if not isinstance(config, dict) or config.get("enabled") is False:
+        return None
+    base = path.parent
+    if isinstance(config.get("script"), str):
+        # Python handlers run with ASE Studio's own interpreter.
+        command = [sys.executable, str((base / config["script"]).resolve())]
+    elif (isinstance(config.get("command"), list) and config["command"]
+          and all(isinstance(part, str) for part in config["command"])):
+        command = list(config["command"])
+    else:
+        fail("The submission handler configuration needs a script or a command.", 500)
+    return command, base, key
+
+
+def submission_handler_call(action, payload=None):
+    """Run one handler action: JSON request on stdin, JSON response on stdout."""
+    handler = submission_handler()
+    if handler is None:
+        fail("No submission handler is configured.", 404)
+    command, base, key = handler
+    with _SUBMISSION_HANDLER_LOCK:
+        if _SUBMISSION_HANDLER["key"] != key:
+            _SUBMISSION_HANDLER.update(session=None, describe=None, key=key)
+        session = _SUBMISSION_HANDLER["session"]
+    request = {**(payload or {}), "session": session,
+               "studio": {"version": STUDIO_VERSION}}
+    timeout = (SUBMISSION_HANDLER_UPLOAD_TIMEOUT if action == "upload"
+               else SUBMISSION_HANDLER_TIMEOUT)
+    try:
+        result = subprocess.run([*command, action], input=json.dumps(request),
+                                capture_output=True, text=True, cwd=base, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        fail("The submission handler did not answer in time.", 504)
+    except OSError as error:
+        fail(f"The submission handler could not be started: {error}", 500)
+    try:
+        response = json.loads(result.stdout)
+        if not isinstance(response, dict):
+            raise ValueError
+    except ValueError:
+        detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or [""]
+        fail(f"The submission handler returned an invalid response. {detail[0]}".strip(), 502)
+    if "session" in response:
+        with _SUBMISSION_HANDLER_LOCK:
+            if _SUBMISSION_HANDLER["key"] == key:
+                _SUBMISSION_HANDLER["session"] = response.pop("session")
+    if response.get("error"):
+        fail(str(response["error"]), 401 if response.get("signIn") else 502)
+    return response
+
+
+def submission_handler_info():
+    """Describe the configured handler for the interface, cached per configuration."""
+    handler = submission_handler()
+    if handler is None:
+        return {"available": False}
+    with _SUBMISSION_HANDLER_LOCK:
+        cached = (_SUBMISSION_HANDLER["describe"]
+                  if _SUBMISSION_HANDLER["key"] == handler[2] else None)
+    if cached is None:
+        cached = submission_handler_call("describe")
+        with _SUBMISSION_HANDLER_LOCK:
+            _SUBMISSION_HANDLER["describe"] = cached
+    return {"available": True, **cached}
+
+
+def submission_handler_action(data):
+    """Run an interface request; ZIP paths are validated before reaching the handler."""
+    action = data.get("action")
+    if action not in SUBMISSION_HANDLER_ACTIONS:
+        fail("Unknown submission handler action.")
+    payload = {key: value for key, value in data.items() if key not in {"action", "archive"}}
+    preview = None
+    if action in {"preview", "upload"}:
+        preview = submission_archive_preview(data.get("archive"))
+        archive = submission_archive_file(data.get("archive"))
+        payload["archive"] = {"path": str(archive), "filename": archive.name,
+                              "stem": archive.stem, "size": preview["size"]}
+    response = submission_handler_call(action, payload)
+    if action == "preview":
+        response = {**preview, **response}
+    return {"ok": True, **response}
+
+
+def reveal_submission_folder(archive_path):
+    """Open the file manager at a completed submission's directory."""
+    archive = submission_archive_file(archive_path)
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         fail("A Linux desktop session is required to open the submission folder.")
     opener = shutil.which("xdg-open")
@@ -6016,6 +6143,14 @@ class Handler(SimpleHTTPRequestHandler):
     def send_json(self, value, status=200):
         data = json.dumps(value).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def send_file_download(self, path, content_type):
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.end_headers()
+        self.wfile.write(data)
     def read_json(self):
         size = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(size))
@@ -6065,6 +6200,12 @@ class Handler(SimpleHTTPRequestHandler):
             if url.path == "/api/pipeline":
                 return self.send_json(pipeline_for_display(
                     parse_qs(url.query).get("name", [""])[0]))
+            if url.path == "/api/submission-handler":
+                return self.send_json(submission_handler_info())
+            if url.path == "/api/submission/download":
+                archive = submission_archive_file(
+                    parse_qs(url.query).get("archive", [""])[0])
+                return self.send_file_download(archive, "application/zip")
             if url.path == "/api/config":
                 folder = project_dir(parse_qs(url.query).get("name", [""])[0])
                 return self.send_json(project_config(folder))
@@ -6125,6 +6266,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(pull_update(discard))
             if self.path == "/api/open-with":
                 return self.send_json(open_with_editor(data.get("name")))
+            if self.path == "/api/submission-handler":
+                return self.send_json(submission_handler_action(data))
             if self.path == "/api/submission/reveal":
                 return self.send_json(reveal_submission_folder(data.get("archive")))
             if self.path == "/api/submit":

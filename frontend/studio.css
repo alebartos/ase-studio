@@ -421,6 +421,46 @@ dialog::backdrop { background: #0f172a73; }
 .submission-file-list { display: grid; gap: 4px; max-height: 110px; overflow: auto; color: var(--muted); font: 11px/1.4 ui-monospace, monospace; }
 .submission-file-entry { display: flex; justify-content: space-between; gap: 12px; }
 .submission-file-entry strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.handler-options { display: grid; gap: 10px; }
+.handler-options[hidden], #handler-section[hidden] { display: none; }
+.handler-options small { color: var(--muted); line-height: 1.4; }
+.handler-account, .submissions-destination { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink); }
+.handler-account span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.handler-destination { margin: 0; color: var(--ink); }
+.handler-experimental { padding: 1px 6px; border: 1px solid #f59f00; border-radius: 4px; color: #a85d00; font-size: 11px; }
+#upload-review-dialog { width: min(620px, calc(100vw - 30px)); }
+#upload-review-form, #submissions-form { padding: 20px; display: grid; gap: 14px; max-height: calc(100vh - 30px); overflow: auto; }
+#upload-review-form h2, #submissions-form h2, #handler-login-form h2 { margin: 0; color: var(--ink); font-size: 18px; text-transform: none; letter-spacing: normal; }
+#upload-review-form > p, #submissions-form > small { margin: 0; color: var(--muted); line-height: 1.4; }
+#upload-review-form fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; }
+.upload-review-summary { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; align-items: center; margin: 0; }
+.upload-review-summary dt { color: var(--muted); font-weight: 600; }
+.upload-review-summary dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+#upload-review-file { font: 12px/1.4 ui-monospace, monospace; }
+.upload-review-entries { display: grid; gap: 4px; max-height: 200px; overflow: auto; color: var(--muted); font: 11px/1.4 ui-monospace, monospace; }
+#submissions-dialog { width: min(760px, calc(100vw - 30px)); }
+.submissions-list { display: grid; gap: 6px; max-height: min(420px, 55vh); overflow: auto; }
+.submissions-empty { margin: 0; padding: 14px; color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 6px; }
+.submission-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.submission-item-main { display: grid; gap: 2px; min-width: 0; }
+.submission-item-main strong, .submission-item-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.submission-item-main small, .submission-item-meta { color: var(--muted); }
+.submission-item-main a { color: var(--blue); }
+.submission-item-meta { display: grid; justify-items: end; gap: 1px; font-size: 11px; }
+.submission-item-status { font-weight: 600; color: #2b8a3e; }
+.submission-item.withdrawn .submission-item-main strong, .submission-item.withdrawn .submission-item-main a { color: var(--muted); text-decoration: line-through; }
+.submission-item.withdrawn .submission-item-status { color: #c92a2a; }
+@media (max-width: 560px) { .submission-item { grid-template-columns: minmax(0, 1fr) auto; } .submission-item-meta { grid-column: 1; justify-items: start; } }
+#handler-login-dialog { width: min(440px, calc(100vw - 30px)); }
+#handler-login-form { padding: 20px; display: grid; gap: 14px; }
+#handler-login-form > p { margin: 0; color: var(--muted); line-height: 1.4; }
+.handler-login-fields { display: grid; gap: 14px; }
+#handler-remember-wrap { flex-wrap: wrap; }
+#handler-remember-wrap small { flex-basis: 100%; padding-left: 22px; color: var(--muted); }
+.handler-login-fields label { display: grid; gap: 6px; font-weight: 600; }
+.handler-login-fields input, #upload-review-description { width: 100%; min-width: 0; border: 1px solid #b8c5d6; border-radius: 5px; padding: 8px; color: var(--ink); background: #fff; }
+#handler-login-form > .handler-login-message { color: var(--ink); white-space: pre-wrap; }
+#handler-login-form > .handler-login-message.error { color: #c92a2a; }
 #environment-dialog { width: min(650px, calc(100vw - 30px)); }
 #environment-form { padding: 20px; display: grid; gap: 14px; max-height: calc(100vh - 30px); overflow: auto; }
 #environment-form h2 { margin: 0; color: var(--ink); font-size: 18px; text-transform: none; letter-spacing: normal; }
@@ -498,7 +538,10 @@ html[data-theme="dark"] .editor-wrap,
 html[data-theme="dark"] dialog,
 html[data-theme="dark"] #cpu-form,
 html[data-theme="dark"] #predictor-form,
-html[data-theme="dark"] #submission-form { background: #111827; color: var(--ink); }
+html[data-theme="dark"] #submission-form,
+html[data-theme="dark"] #upload-review-form,
+html[data-theme="dark"] #submissions-form,
+html[data-theme="dark"] #handler-login-form { background: #111827; color: var(--ink); }
 html[data-theme="dark"] button,
 html[data-theme="dark"] #search,
 html[data-theme="dark"] #cycle-jump,
@@ -511,8 +554,14 @@ html[data-theme="dark"] #cpu-form input[type="text"],
 html[data-theme="dark"] #predictor-fields input,
 html[data-theme="dark"] #submission-assignment,
 html[data-theme="dark"] #submission-files,
+html[data-theme="dark"] .handler-login-fields input,
+html[data-theme="dark"] #upload-review-description,
 html[data-theme="dark"] .memory-watch-controls select { background: #1f2937; border-color: #4b5d73; color: #e5edf7; }
 html[data-theme="dark"] .submission-projects { background: #182233; }
+html[data-theme="dark"] #handler-login-form > .handler-login-message.error,
+html[data-theme="dark"] .submission-item.withdrawn .submission-item-status { color: #fca5a5; }
+html[data-theme="dark"] .submission-item-status { color: #86efac; }
+html[data-theme="dark"] .handler-experimental { color: #fcd34d; border-color: #b45309; }
 html[data-theme="dark"] .submission-project:hover { background: #243249; }
 html[data-theme="dark"] .theme { background: #334155; color: #f8fafc; }
 html[data-theme="dark"] .gear { background: #334155; color: #f8fafc; }
