@@ -70,7 +70,7 @@
 <dialog id="submission-dialog"><form id="submission-form">
   <h2>Prepare submission</h2>
   <p>Choose the ASE projects and optional supporting files to include in one ZIP archive.</p>
-  <label class="submission-assignment">Assignment name<input id="submission-assignment" type="text" placeholder="lab_1" pattern="[A-Za-z][A-Za-z0-9_-]{0,63}" required></label>
+  <label class="submission-assignment">Assignment name<input id="submission-assignment" type="text" placeholder="lab_1" pattern="[A-Za-z][A-Za-z0-9_\-]{0,63}" required></label>
   <fieldset><legend>Projects</legend>
     <div class="submission-project-tools"><small>Each selected project is built and simulated with its saved CPU configuration.</small><span><button id="submission-select-all" type="button">Select all</button><button id="submission-select-none" type="button">Clear</button></span></div>
     <div id="submission-projects" class="submission-projects"></div>
